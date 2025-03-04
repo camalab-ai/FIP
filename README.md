@@ -44,3 +44,19 @@ train_model.py \
 	--wandb_entity <name_of_wandb_entity>
 	--pe 0
 ```
+
+### Quantitative evaluation:
+```
+python eval_quan.py
+    --data_dir <path_to_val_sequences> \
+    --models <path_to_model1> <path_to_model2> ... <path_to_modelN>
+```
+
+
+### PCIF computation:
+```
+python PCIF.py
+    --data_dir <path_to_val_sequences> \
+    --models <path_to_model1> <path_to_model2> ... <path_to_modelN>
+```
+
