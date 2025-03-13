@@ -60,3 +60,12 @@ python PCIF.py
     --models <path_to_model1> <path_to_model2> ... <path_to_modelN>
 ```
 
+### Flow map generation:
+```
+python PCIF.py
+    --data_dir <path_to_val_sequences> \
+    --output_dir <path_to_dir_for_results> \
+    --models <path_to_model1> <path_to_model2> ... <path_to_modelN> \
+    --seq_num <number_of_sequence> \
+    --frame_num <number_of_frame> \
+```
