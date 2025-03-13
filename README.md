@@ -69,3 +69,7 @@ python PCIF.py
     --seq_num <number_of_sequence> \
     --frame_num <number_of_frame> \
 ```
+
+### Data
+For evaluation, PCIF computation and flow map generation additional files are needed (test data with added noise, optical flow maps and occlusion masks). In case you would
+be interested in, please contact us, we will share prepared files with you.
