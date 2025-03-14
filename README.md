@@ -35,7 +35,7 @@ train_model.py \
 	--wandb_entity <name_of_wandb_entity>
 	--no_pfe
 ```
-c) with FIP and without PostFip epoch:
+c) without FIP:
 ```
 train_model.py \
 	--trainset_dir <path_to_input_mp4s> \
