@@ -1,4 +1,6 @@
 Code for training CGNet-D2
+
+(To use code for models trained on ReCRVD dataset change git branch to "ReCRVD")
 ### Environment
 
 The code runs on Python 3.8. You can create a virtualenv by running
@@ -19,7 +21,7 @@ If you want to train models first:
 a) with FIP and PostFip epoch:
 
 ```
-train_model.py \
+python train_model.py \
 	--trainset_dir <path_to_input_mp4s> \
 	--valset_dir <path_to_val_sequences> \
 	--log_dir <path_to_dir_for_chkecpoints> \
@@ -28,7 +30,7 @@ train_model.py \
 
 b) with FIP and without PostFip epoch:
 ```
-train_model.py \
+python train_model.py \
 	--trainset_dir <path_to_input_mp4s> \
 	--valset_dir <path_to_val_sequences> \
 	--log_dir <path_to_dir_for_chkecpoints> \
@@ -37,7 +39,7 @@ train_model.py \
 ```
 c) without FIP:
 ```
-train_model.py \
+python train_model.py \
 	--trainset_dir <path_to_input_mp4s> \
 	--valset_dir <path_to_val_sequences> \
 	--log_dir <path_to_dir_for_chkecpoints> \
