@@ -3,24 +3,33 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import wandb
-
-from models import CGNet_D2
-from dataset import ValDataset
-from dataloaders import train_dali_loader
+from torch.utils.data import DataLoader
+from models import CGNet_D3
+from dataset import ValDataset, TrainDataset
 from utils import close_logger, init_logging, normalize_augment
 from train_common import resume_training, log_train_psnr, \
 					validate_and_log, save_model_checkpoint, CosineAnnealingRestartLR
-
+import wandb
+import math
 
 def main(**args):
 	r"""Performs the main training loop
 	"""
+	ISO_list = [1600, 3200, 6400, 12800, 25600]
 	# Load dataset
 	print('> Loading datasets ...')
-	dataset_val = ValDataset(valsetdir=args['valset_dir'], gray_mode=False)
-	ctrl_fr_idx = (args['temp_patch_size'] - 1) // 2
+	dataset_val = [ValDataset(ISO=ISO, data_dir=args['valset_dir'], gray_mode=False) for ISO in ISO_list]
 
+	num_minibatches = int(args['max_number_patches'] // args['batch_size'][0])
+	print("\t# of training samples: %d\n" % int(args['max_number_patches']))
+
+	a_list = [3.513262, 6.955588, 13.486051, 26.585953, 52.032536]
+	b_list = [11.917691, 38.117816, 130.818508, 484.539790, 1819.818657]
+
+	config = {
+		'experiment': args['log_dir'].split('/')[-1][:-2],
+		'model': args['init_model']
+	}
 	wandb.init(project='FIP', entity=args['wandb_entity'])
 	wandb.run.name = args['log_dir'].split('/')[-1]
 	wandb.run.save()
@@ -32,7 +41,7 @@ def main(**args):
 	torch.backends.cudnn.benchmark = True # CUDNN optimization
 
 	# Create model
-	model = CGNet_D2()
+	model = CGNet_D3()
 	model = nn.DataParallel(model, device_ids=device_ids).cuda()
 	print(sum(p.numel() for p in model.parameters()))
 	# Define loss
@@ -86,56 +95,44 @@ def main(**args):
 		print('\nlearning rate %f' % current_lr)
 		for num, milestone in enumerate(args['milestone']):
 			if epoch < milestone:
-				train_loader = train_dali_loader(batch_size=int(args['batch_size'][num]), \
-												  file_root=args['trainset_dir'], \
-												  sequence_length=args['temp_patch_size'], \
-												  crop_size=args['patch_size'][num], \
-												  epoch_size=args['max_number_patches'], \
-												  random_shuffle=True, \
-												  temp_stride=3,
-												  seed=1)
+				dataset_train = TrainDataset(data_dir=args['trainset_dir'], sequence_length=args['temp_patch_size'],
+											 crop_size=args['patch_size'][num], epoch_size=args['max_number_patches'],
+											 gray_mode=False, create_data=True)
+				dataloader_train = DataLoader(dataset_train, batch_size=int(args['batch_size'][num]), shuffle=True, num_workers=0)
 				num_minibatches = int(args['max_number_patches'] // args['batch_size'][num])
 				print("\t# of training samples: %d\n" % int(args['max_number_patches']))
 				break
 
 		# train
-		for i, orig_data in enumerate(train_loader):
-			datas = [orig_data]
-			data = [{'data': torch.cat([d[0]['data'] for d in datas], dim=0)}]
+		for i, data in enumerate(dataloader_train, 0):
 
 			# Pre-training step
 			model.train()
-
-			# When optimizer = optim.Optimizer(net.parameters()) we only zero the optim's grads
 			optimizer.zero_grad()
 
-			# convert inp to [N, num_frames*C. H, W] in  [0., 1.] from [N, num_frames, C. H, W] in [0., 255.]
-			# extract ground truth (central frame)
-			img_train, gt_train = normalize_augment(data[0]['data'], ctrl_fr_idx)
-			N, _, H, W = img_train.size()
-
-			# std dev of each sequence
-			stdn = torch.empty((N, 1, 1, 1)).cuda().uniform_(args['noise_ival'][0], to=args['noise_ival'][1])
-			# draw noise samples from std dev tensor
-			noise = torch.zeros_like(img_train)
-			noise = torch.normal(mean=noise, std=stdn.expand_as(noise))
-
-			if is_pretraining:
-				imgn_train = img_train
-			else:
-				imgn_train = img_train + noise
+			gt, noise, ISOs = data
+			imgn_train, gt_train = normalize_augment(data)
+			N, _, H, W = imgn_train.size()
+			levels = [ISO_list.index(ISO) for ISO in ISOs]
+			a = torch.as_tensor([a_list[level] for level in levels]).cuda()
+			b = torch.as_tensor([math.sqrt(b_list[level]) for level in levels]).cuda()
 
 			# Send tensors to GPU
 			gt_train = gt_train.cuda(non_blocking=True)
 			imgn_train = imgn_train.cuda(non_blocking=True)
-			noise = noise.cuda(non_blocking=True)
-			noise_map = stdn.expand((N, 1, H, W)).cuda(non_blocking=True) # one channel per image
+			if is_pretraining:
+				noise = imgn_train - gt_train
+				imgn_train = gt_train + noise * epoch / (args['pretraining_epochs'] - 1)
+			gt_train = gt_train[:, 3:4]
+			poisson_map = a.view(N,1,1,1).expand((N, 1, H, W)).cuda(non_blocking=True)  # one channel per image
+			gaussian_map = b.view(N,1,1,1).expand((N, 1, H, W)).cuda(non_blocking=True)
+			noise_map = torch.cat((poisson_map, gaussian_map), 1) / (2**12-1 - 240)
 
 			# Evaluate model and optimize it
 			if is_pretraining:
-				out_train, inter = model(imgn_train, noise_map, noise=noise, epoch=epoch, pretraining_epochs=args['pretraining_epochs'])
-				loss = (criterion(gt_train, out_train) + criterion(gt_train, inter)) / (N * 2)
-			elif epoch == args['pretraining_epochs'] and args['pretraining_epochs'] > 0 and not args['no_postfipepoch']:
+				out_train, inter, inter2 = model(imgn_train, noise_map, fip=True)
+				loss = (criterion(gt_train, out_train) + criterion(gt_train, inter) + criterion(gt_train, inter2)) / (N * 2)
+			elif epoch == args['pretraining_epochs'] and args['pretraining_epochs'] > 0:
 				out_train = model(imgn_train, noise_map, factor=float(i + 1) / num_minibatches)
 				loss = criterion(gt_train, out_train) / (N * 2)
 			else:
@@ -165,15 +162,14 @@ def main(**args):
 		model.eval()
 
 		# Validation and log images
-		psnr_val = validate_and_log(
+		validate_and_log(
 						model_temp=model, \
 						dataset_val=dataset_val, \
-						valnoisestd=args['val_noiseL'], \
 						temp_psz=args['temp_patch_size'], \
 						epoch=epoch, \
-						lr=current_lr
+						lr=current_lr, \
 						)
-		print(psnr_val)
+
 		# save model and checkpoint
 		training_params['start_epoch'] = epoch + 1
 		save_model_checkpoint(model, args, optimizer, training_params, epoch)
@@ -191,50 +187,39 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="Train the denoiser")
 
 	#Training parameters
-	parser.add_argument("--batch_size", type=int, nargs=6, default=[8,8,8,4,2,2], 	\
+	parser.add_argument("--batch_size", type=int, default=[8,8,8,4,2,2], 	\
 					 help="Training batch size")
+	parser.add_argument("--init_model", type=int)
 	parser.add_argument("--epochs", "--e", type=int, default=80, \
 					 help="Number of total training epochs")
 	parser.add_argument("--pretraining_epochs", "--pe", type=int, default=10)
-	parser.add_argument("--no_postfipepoch", "--no_pfe", action='store_true')
 	parser.add_argument("--resume_training", "--r", action='store_true',\
 						help="resume training from a previous checkpoint")
-	parser.add_argument("--milestone", type=int, nargs=6, default=[17, 37, 54, 66, 74, 80], \
+	parser.add_argument("--milestone", nargs=2, type=int, default=[17, 37, 54, 66, 74, 80], \
 						help="When to decay learning rate; should be lower than 'epochs'")
 	parser.add_argument("--lr", type=float, default=1e-3, \
 					 help="Initial learning rate")
-	parser.add_argument("--no_orthog", action='store_true',\
-						help="Don't perform orthogonalization as regularization")
 	parser.add_argument("--save_every", type=int, default=10,\
 						help="Number of training steps to log psnr and perform \
 						orthogonalization")
 	parser.add_argument("--save_every_epochs", type=int, default=1,\
 						help="Number of training epochs to save state")
-	parser.add_argument("--noise_ival", nargs=2, type=int, default=[5, 50], \
-					 help="Noise training interval")
-	parser.add_argument("--val_noiseL", type=float, default=25, \
-						help='noise level used on validation set')
 	# Preprocessing parameters
-	parser.add_argument("--patch_size", "--p", type=int, nargs=6, default=[128, 160, 192, 256, 320, 384], help="Patch size")
-	parser.add_argument("--temp_patch_size", "--tp", type=int, default=5, help="Temporal patch size")
+	parser.add_argument("--patch_size", "--p", type=int, default=[128, 160, 192, 256, 320, 384], help="Patch size")
+	parser.add_argument("--temp_patch_size", "--tp", type=int, default=7, help="Temporal patch size")
 	parser.add_argument("--max_number_patches", "--m", type=int, default=38400, \
 						help="Maximum number of patches")
 	# Dirs
-	parser.add_argument("--log_dir", type=str, default="/mnt/4TB/MA_results/L_CGNet_D2_FIP", \
+	parser.add_argument("--log_dir", type=str, default="/mnt/4TB/MA_results/I_raw_reCRVD_CGNet_D3_FIP", \
 					 help='path of log files')
-	parser.add_argument("--trainset_dir", type=str, default='/mnt/4TB/datasets/DAVIS2Share/videos/train_official', \
+	parser.add_argument("--trainset_dir", type=str, default='/mnt/4TB/datasets/ReCRVD/reCRVD', \
 					 help='path of trainset')
-	parser.add_argument("--valset_dir", type=str, default='/mnt/4TB/datasets/DAVIS2Share/val', \
+	parser.add_argument("--valset_dir", type=str, default='/mnt/4TB/datasets/ReCRVD/reCRVD', \
 						 help='path of validation set')
 	parser.add_argument("--wandb_entity", type=str, default='PKO-personal')
 	argspar = parser.parse_args()
 
-	# Normalize noise between [0, 1]
-	argspar.val_noiseL /= 255.
-	argspar.noise_ival[0] /= 255.
-	argspar.noise_ival[1] /= 255.
-
-	print("\n### Training CGNet-D2 ###")
+	print("\n### Training CGNet-D3 denoiser model ###")
 	print("> Parameters:")
 	for p, v in zip(argspar.__dict__.keys(), argspar.__dict__.values()):
 		print('\t{}: {}'.format(p, v))

@@ -235,10 +235,10 @@ class NAFBlock0(nn.Module):
 
 class CascadedGazeNetBigger(nn.Module):
 
-	def __init__(self, img_channel=3, width=32, middle_blk_num=6, enc_blk_nums=[2, 2, 3, 4], dec_blk_nums=[1, 1, 1, 2], GCE_CONVS_nums=[4,4,3,3]):
+	def __init__(self, img_channel=4, width=32, middle_blk_num=6, enc_blk_nums=[2, 2, 3, 4], dec_blk_nums=[1, 1, 1, 2], GCE_CONVS_nums=[4,4,3,3]):
 		super().__init__()
 
-		self.intro = nn.Conv2d(in_channels=3 * (img_channel + 1), out_channels=3 * 16, kernel_size=3, padding=1,
+		self.intro = nn.Conv2d(in_channels=3 * (img_channel + 2), out_channels=3 * 16, kernel_size=3, padding=1,
 							   stride=1,
 							   groups=3,
 							   bias=True)
@@ -314,7 +314,6 @@ class CascadedGazeNetBigger(nn.Module):
 			x = decoder(x)
 
 		x = self.ending(x)
-		# x = torch.clamp(x, -1, 1)
 		if factor is not None:
 			x = x + in1 * factor
 		else:
@@ -322,20 +321,31 @@ class CascadedGazeNetBigger(nn.Module):
 
 		return x
 
+class SpaceToDepth(nn.Module):
+	def __init__(self, block_size=2):
+		super().__init__()
+		assert block_size in {2, 4}, "Space2Depth only supports blocks size = 4 or 2"
+		self.block_size = block_size
 
-class CGNet_D2(nn.Module):
-	""" Definition of the CGNet-D2 model.
-	Inputs of forward():
-		xn: input frames of dim [N, C, H, W], (C=3 RGB)
-		noise_map: array with noise map of dim [N, 1, H, W]
-	"""
+	def forward(self, x):
+		N, C, H, W = x.size()
+		S = self.block_size
+		x = x.view(N, C, H // S, S, W // S, S)  # (N, C, H//bs, bs, W//bs, bs)
+		x = x.permute(0, 3, 5, 1, 2, 4).contiguous()  # (N, bs, bs, C, H//bs, W//bs)
+		x = x.view(N, C * S * S, H // S, W // S)  # (N, C*bs^2, H//bs, W//bs)
+		return x
 
-	def __init__(self, num_input_frames=5):
-		super(CGNet_D2, self).__init__()
+class CGNet_D3(nn.Module):
+
+	def __init__(self, num_input_frames=7):
+		super(CGNet_D3, self).__init__()
 		self.num_input_frames = num_input_frames
+		self.S2D = SpaceToDepth(2)
+		self.PS = nn.PixelShuffle(2)
 		# Define models of each denoising stage
 		self.temp1 = CascadedGazeNetBigger()
 		self.temp2 = CascadedGazeNetBigger()
+		self.temp3 = CascadedGazeNetBigger()
 		# Init weights
 		self.reset_params()
 
@@ -352,47 +362,62 @@ class CGNet_D2(nn.Module):
 			if m.bias is not None:
 				m.bias.data.fill_(bias_fill)
 
-
 	def reset_params(self):
 		for _, m in enumerate(self.modules()):
 			self.weight_init(m)
 
-	def forward(self, x, noise_map, noise=None, epoch=0, pretraining_epochs=1, factor=None):
+	def forward(self, x, noise_map, fip=None, factor=None):
 		'''Args:
 			x: Tensor, [N, num_frames*C, H, W] in the [0., 1.] range
 			noise_map: Tensor [N, 1, H, W] in the [0., 1.] range
 		'''
-
 		# Unpack inputs
-		(x0, x1, x2, x3, x4) = tuple(x[:, 3*m:3*m+3, :, :] for m in range(self.num_input_frames))
+		(x0, x1, x2, x3, x4, x5, x6) = tuple(self.S2D(x[:, m:m+1, :, :]) for m in range(self.num_input_frames))
+		noise_map = noise_map[:, :, 0:noise_map.shape[2] // 2, 0:noise_map.shape[3] // 2]
+
+		if fip is not None:
+			zeros = torch.zeros_like(x2)
+			x20 = self.temp1(x0, zeros, x1, noise_map)
+			x21 = self.temp1(x1, zeros, x2, noise_map)
+			x22 = self.temp1(x2, zeros, x4, noise_map)
+			x23 = self.temp1(x4, zeros, x5, noise_map)
+			x24 = self.temp1(x5, zeros, x6, noise_map)
+
+			# Second stage
+			x31 = self.temp2(x20, x21, x22, noise_map)
+			x32 = self.temp2(x21, x22, x23, noise_map)
+			x33 = self.temp2(x22, x23, x24, noise_map)
+
+			x = self.temp3(x31, x32, x33, noise_map)
+			return self.PS(x), self.PS(x32), self.PS(x22)
 
 		# First stage
-		if noise is not None:
-			factor = float(epoch)/float(pretraining_epochs-1)
-			(n0, n1, n2, n3, n4) = tuple(noise[:, 3 * m:3 * m + 3, :, :] for m in range(5))
-			zeros = torch.zeros_like(x2)
-			x20 = self.temp1(x0+n0*factor, zeros, x1+n1*factor, noise_map)
-			x21 = self.temp1(x1+n1*factor, zeros, x3+n3*factor, noise_map)
-			x22 = self.temp1(x3+n3*factor, zeros, x4+n4*factor, noise_map)
-			x = self.temp2(x20, x21, x22, noise_map)
-			return x, x21
+		x20 = self.temp1(x0, x1, x2, noise_map, factor)
+		x21 = self.temp1(x1, x2, x3, noise_map, factor)
+		x22 = self.temp1(x2, x3, x4, noise_map, factor)
+		x23 = self.temp1(x3, x4, x5, noise_map, factor)
+		x24 = self.temp1(x4, x5, x6, noise_map, factor)
 
-		else:
-			x20 = self.temp1(x0, x1, x2, noise_map, factor)
-			x21 = self.temp1(x1, x2, x3, noise_map, factor)
-			x22 = self.temp1(x2, x3, x4, noise_map, factor)
+		# Second stage
+		x31 = self.temp2(x20, x21, x22, noise_map)
+		x32 = self.temp2(x21, x22, x23, noise_map)
+		x33 = self.temp2(x22, x23, x24, noise_map)
 
-		#Second stage
-		x = self.temp2(x20, x21, x22, noise_map)
-
+		x = self.temp3(x31, x32, x33, noise_map)
+		x = self.PS(x)
 		return x
 
 	def forward_single_image(self, x, noise_map):
-
+		'''Args:
+			x: Tensor, [N, num_frames*C, H, W] in the [0., 1.] range
+			noise_map: Tensor [N, 1, H, W] in the [0., 1.] range
+		'''
+		# Unpack inputs
+		noise_map = noise_map[:, :, 0:noise_map.shape[2] // 2, 0:noise_map.shape[3] // 2]
 		# First stage
-		x20 = self.temp1(x, x, x, noise_map)
+		x = self.S2D(x)
+		x = self.temp1(x, x, x, noise_map)
+		x = self.temp2(x, x, x, noise_map)
+		x = self.temp2(x, x, x, noise_map)
 
-		#Second stage
-		x = self.temp2(x20, x20, x20, noise_map)
-
-		return x
+		return self.PS(x)

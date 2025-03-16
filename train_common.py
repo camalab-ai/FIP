@@ -1,10 +1,9 @@
 import os
+import time
 import torch
 from utils import batch_psnr
 from infer_utils import denoise_seq
 import wandb
-import tqdm
-
 
 def	resume_training(argdict, model, optimizer, scheduler):
 	""" Resumes previous training or starts anew
@@ -49,13 +48,11 @@ def	resume_training(argdict, model, optimizer, scheduler):
 		training_params = {}
 		training_params['step'] = 0
 		training_params['current_lr'] = 0
-		training_params['no_orthog'] = argdict['no_orthog']
 
 	return start_epoch, training_params
 
 import math
 from torch.optim.lr_scheduler import _LRScheduler
-
 
 def get_position_from_periods(iteration, cumulative_period):
 	"""Get the position from a period list.
@@ -119,29 +116,11 @@ class CosineAnnealingRestartLR(_LRScheduler):
 		]
 
 
-def lr_scheduler(epoch, argdict):
-	"""Returns the learning rate value depending on the actual epoch number
-	By default, the training starts with a learning rate equal to 1e-3 (--lr).
-	After the number of epochs surpasses the first milestone (--milestone), the
-	lr gets divided by 100. Up until this point, the orthogonalization technique
-	is performed (--no_orthog to set it off).
-	"""
-	# Learning rate value scheduling according to argdict['milestone']
-	reset_orthog = False
-	if epoch > argdict['milestone'][1]:
-		current_lr = argdict['lr'] / 1000.
-		reset_orthog = True
-	elif epoch > argdict['milestone'][0]:
-		current_lr = argdict['lr'] / 10.
-	else:
-		current_lr = argdict['lr']
-	return current_lr, reset_orthog
-
 def	log_train_psnr(result, imsource, loss, epoch, idx, num_minibatches, training_params):
 	'''Logs trai loss.
 	'''
 	#Compute pnsr of the whole batch
-	psnr_train = batch_psnr(torch.clamp(result, 0., 1.), imsource, 1., val=False)
+	psnr_train = batch_psnr(result, imsource, 1., val=False)
 
 	# Log the scalar values
 	wandb_logs = {
@@ -149,6 +128,8 @@ def	log_train_psnr(result, imsource, loss, epoch, idx, num_minibatches, training
 		'train_psnr':psnr_train
 	}
 	wandb.log(wandb_logs)
+# 	writer.add_scalar('PSNR on training data', psnr_train, \
+# 		  training_params['step'])
 	print("[epoch {}][{}/{}] loss: {:1.4f} PSNR_train: {:1.4f}".\
 		  format(epoch+1, idx+1, num_minibatches, loss.item(), psnr_train))
 
@@ -169,38 +150,57 @@ def save_model_checkpoint(model, argdict, optimizer, train_pars, epoch):
 		torch.save(save_dict, os.path.join(argdict['log_dir'], 'ckpt_e{}.pth'.format(epoch)))
 	del save_dict
 
-def validate_and_log(model_temp, dataset_val, valnoisestd, temp_psz, \
+def validate_and_log(model_temp, dataset_val, temp_psz, \
 					 epoch, lr):
 	"""Validation step after the epoch finished
 	"""
+	iso_list = [1600, 3200, 6400, 12800, 25600]
+	a_list = [3.513262, 6.955588, 13.486051, 26.585953, 52.032536]
+	b_list = [11.917691, 38.117816, 130.818508, 484.539790, 1819.818657]
 
-	psnr_val, psnr_single_frame = 0, 0
+	t1 = time.time()
 
-	for seq_val, seq_path in tqdm.tqdm(dataset_val):
-		noise = torch.FloatTensor(seq_val.size()).normal_(mean=0, std=valnoisestd)
-		seqn_val = seq_val + noise
-		seqn_val = seqn_val.cuda()
-		sigma_noise = torch.cuda.FloatTensor([valnoisestd])
-		with torch.no_grad():
-			out_val, denframes_single_frame = denoise_seq(seq=seqn_val, \
-										noise_std=sigma_noise, \
-										temp_psz=temp_psz,\
-										model_temporal=model_temp)
-
-
-			psnr_val += batch_psnr(out_val.cpu(), seq_val.squeeze_(), 1.)
-			psnr_single_frame += batch_psnr(denframes_single_frame, seq_val.squeeze_(), 1.)
-
-	psnr_val /= len(dataset_val)
-	psnr_single_frame /= len(dataset_val)
-
+	levels = [0,1,2,3,4]
 	wandb_logs = {
 		'Learning rate': lr,
-		'val/PSNR': psnr_val,
-		'val/SFD': psnr_val - psnr_single_frame,
-
 		'epoch': epoch,
 	}
+	with torch.no_grad():
+		avg_psnr = 0
+		avg_psnr_SFD = 0
+		for level in levels:
+			a = torch.tensor(a_list[level], dtype=torch.float).cuda()
+			b = torch.tensor(math.sqrt(b_list[level ]), dtype=torch.float).cuda()
 
+			psnr_val, psnr_val_SFD = 0, 0
+			for seqn_val, seq_val in dataset_val[level]:
+				seq_val = seq_val.cuda()
+				seqn_val = (seqn_val.cuda() - 240) / (2 ** 12 - 1 - 240)
+
+				out_val, out_val_SFD = denoise_seq(seq=seqn_val, \
+												 noise_p=a, \
+												 noise_g=b, \
+												 temp_psz=temp_psz, \
+												 model_temporal=model_temp)
+
+				psnr = batch_psnr(out_val.cpu(), (seq_val - 240) / (2 ** 12 - 1 - 240), 1.)
+				psnr_val += psnr
+				psnr_val_SFD += psnr - batch_psnr(out_val_SFD.cpu(), (seq_val - 240) / (2 ** 12 - 1 - 240), 1.)
+
+			psnr_val /= len(dataset_val[level])
+			psnr_val_SFD /= len(dataset_val[level])
+			avg_psnr_SFD += psnr_val_SFD
+			avg_psnr += psnr_val
+			t2 = time.time()
+			print("\n[epoch %d] PSNR_val: %.4f, on %.2f sec" % (epoch+1, psnr_val, (t2-t1)))
+			print("PSNR_SFD_val: %.4f, on %.2f sec" % (psnr_val_SFD, (t2-t1)))
+
+			wandb_logs[f'val/PSNR_level_{level}'] = psnr_val
+
+	avg_psnr = avg_psnr / len(levels)
+	avg_psnr_SFD = avg_psnr_SFD / len(levels)
+	wandb_logs[f'val/PSNR_mean'] = avg_psnr
+	wandb_logs[f'val/PSNR_SFD_mean'] = avg_psnr_SFD
 	wandb.log(wandb_logs)
-	return psnr_val
+	print(avg_psnr, avg_psnr_SFD)
+	return avg_psnr, avg_psnr_SFD
