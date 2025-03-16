@@ -39,7 +39,7 @@ python train_model.py \
 ```
 python test_model.py
     --valset_dir <path_to_ReCRVD_dataset> \
-	--log_dir <path_to_dir_with_chkecpoints>... <path_to_modelN>
+	--log_dir <path_to_dir_with_chkecpoints>
 ```
 
 ### Data
