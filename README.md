@@ -1,3 +1,4 @@
+![Alt text](assets/main_idea_LR2.png)
 
 This is an official implementation of "Lifting Deep Image Denoisers to Video with Frame Interpolation Pre-training"
 
