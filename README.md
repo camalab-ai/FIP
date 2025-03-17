@@ -1,4 +1,7 @@
-Code for training CGNet-D2
+
+This is an official implementation of "Lifting Deep Image Denoisers to Video with Frame Interpolation Pre-training"
+
+
 
 (To use code for models trained on ReCRVD dataset change git branch to "ReCRVD")
 ### Environment
