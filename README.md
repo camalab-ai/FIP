@@ -1,4 +1,4 @@
-![Alt text](assets/main_idea_LR2.png)
+<img src="assets/main_idea_LR2.png" alt="Description" width="100">
 
 This is an official implementation of "Lifting Deep Image Denoisers to Video with Frame Interpolation Pre-training"
 
