@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/main_idea_LR2.png" alt="Description" width="500">
+  <img src="assets/main_idea_LR2.png" alt="Description" width="600">
 </p>
 
 This is an official implementation of "Lifting Deep Image Denoisers to Video with Frame Interpolation Pre-training"
