@@ -1,5 +1,6 @@
 <div align="center">
-  <h1><strong>Lifting Deep Image Denoisers to Video with Frame Interpolation Pre-training</strong></h1>
+  <h1><strong>Lifting Deep Image Denoisers to Video with</strong></h1>
+  <h1><strong>Frame Interpolation Pre-training</strong></h1>
 </div>
 
 <p align="center">
