@@ -3,7 +3,7 @@
 </div>
 
 <p align="center">
-  <img src="visuals/main_idea_LR2.png" alt="Description" width="600">
+  <img src="visuals/main_idea.png" alt="Description" width="600">
 </p>
 
 # Overview
