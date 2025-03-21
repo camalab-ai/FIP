@@ -7,7 +7,7 @@
 </p>
 
 # Overview
-The proposed video denoising adapter trains cascaded image denoisers in two phases. In the first phase, FIP trains the cascade of dense prediction networks (gray) to interpolate the masked central frame (black) using several adjacent input frames with progressively added noise during initial epochs. In the subsequent, standard phase, the same pre-trained cascade is tasked with denoising the central frame, now using unmasked noisy input frames. In the course of this two-phase training, the cascade inherently learns multiple *intrinsic flows* across input frames, without motion-specific modules or external supervision. The flows help leverage the temporal information for improved video denoising. For reference, we illustrate optical flow from [RAFT](https://github.com/princeton-vl/RAFT).
+The proposed video denoising adapter trains cascaded image denoisers in two phases. In the first phase, FIP trains the cascade of dense prediction networks (gray) to interpolate the masked central frame (black) using several adjacent input frames with progressively added noise during initial epochs. In the subsequent, standard phase, the same pre-trained cascade is tasked with denoising the central frame, now using unmasked noisy input frames. In the course of this two-phase training, the cascade inherently learns multiple dense *intrinsic flows* across input frames without motion-specific modules or external supervision. The multiple intrinsic flows help leverage the temporal information for improved video denoising. For reference, we illustrate optical flow from [RAFT](https://github.com/princeton-vl/RAFT).
 
 <p align="center">
   <img src="visuals/noise_and_flow.gif" alt="Demo Animation">
